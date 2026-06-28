@@ -361,6 +361,30 @@ impl MilestoneEscrow {
             return Err(Error::Unauthorized);
         }
 
+        // Reject zero/null addresses.  Two canonical null forms exist on
+        // Stellar: the all-zeros Stellar account (G...) and the all-zeros
+        // contract address (C...).  Whitelisting either would allow fund
+        // transfers to an unspendable address and could be used to silently
+        // brick the escrow.
+        let zero_account = Address::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
+        let zero_contract = Address::from_str(
+            &env,
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        );
+        if token == zero_account || token == zero_contract {
+            return Err(Error::InvalidAddress);
+        }
+
+        // Reject the contract's own address.  A token whose contract address
+        // equals the escrow contract itself makes no semantic sense and would
+        // allow self-referential token operations.
+        if token == env.current_contract_address() {
+            return Err(Error::InvalidAddress);
+        }
+
         let mut whitelist: Vec<Address> = env
             .storage()
             .persistent()

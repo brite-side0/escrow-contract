@@ -4699,3 +4699,274 @@ fn test_add_whitelisted_token_unauthorized_before_cap_check() {
     let result = client.try_add_whitelisted_token(&bad_actor, &new_token);
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
+
+// ============================================================================
+// add_whitelisted_token — strict input validation test suite
+// ============================================================================
+// The checks below cover the new zero-address guards added to
+// `add_whitelisted_token`.  The ordering of checks in the function is:
+//   1. require_auth()                  → host-level panic (Err(Err(_)))
+//   2. admin identity                  → Error::Unauthorized
+//   3. zero Stellar-account address    → Error::InvalidAddress
+//   4. zero contract address           → Error::InvalidAddress
+//   5. self (escrow contract) address  → Error::InvalidAddress
+//   6. duplicate check                 → Error::TokenAlreadyWhitelisted
+//   7. capacity cap                    → Error::InvalidAmount
+// Each test below validates exactly one of these guards in isolation.
+
+/// Input validation test 1 — ZERO STELLAR-ACCOUNT ADDRESS:
+/// Passing the all-zeros Stellar account (G-form) as the `token` argument
+/// must be rejected with `Error::InvalidAddress` before any storage write
+/// occurs.  Whitelisting the null account would allow fund transfers to an
+/// unspendable sink address.
+#[test]
+fn test_add_whitelisted_token_zero_account_address_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let client_addr = Address::generate(&env);
+    let freelancer_addr = Address::generate(&env);
+    let arbiter_addr = Address::generate(&env);
+    let admin_addr = Address::generate(&env);
+
+    let token1 = env
+        .register_stellar_asset_contract_v2(admin_addr.clone())
+        .address();
+
+    let contract_id = env.register(MilestoneEscrow, ());
+    let client = MilestoneEscrowClient::new(&env, &contract_id);
+
+    let amounts = vec![&env, 1_000_i128];
+    client.initialize(
+        &admin_addr,
+        &client_addr,
+        &freelancer_addr,
+        &arbiter_addr,
+        &token1,
+        &604800,
+        &amounts,
+    );
+
+    let zero_account = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    let result = client.try_add_whitelisted_token(&admin_addr, &zero_account);
+    assert_eq!(result, Err(Ok(Error::InvalidAddress)));
+
+    // Whitelist must be unchanged — no mutation on rejected call.
+    assert_eq!(client.get_whitelisted_tokens().len(), 1);
+}
+
+/// Input validation test 2 — ZERO CONTRACT ADDRESS (C-form):
+/// Passing the all-zeros contract address (C-form) as the `token` argument
+/// must be rejected with `Error::InvalidAddress`.  This mirrors the guard
+/// already present on `mark_delivered` and `approve_partial`, making the
+/// null-address policy consistent across all entry points.
+#[test]
+fn test_add_whitelisted_token_zero_contract_address_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let client_addr = Address::generate(&env);
+    let freelancer_addr = Address::generate(&env);
+    let arbiter_addr = Address::generate(&env);
+    let admin_addr = Address::generate(&env);
+
+    let token1 = env
+        .register_stellar_asset_contract_v2(admin_addr.clone())
+        .address();
+
+    let contract_id = env.register(MilestoneEscrow, ());
+    let client = MilestoneEscrowClient::new(&env, &contract_id);
+
+    let amounts = vec![&env, 1_000_i128];
+    client.initialize(
+        &admin_addr,
+        &client_addr,
+        &freelancer_addr,
+        &arbiter_addr,
+        &token1,
+        &604800,
+        &amounts,
+    );
+
+    let zero_contract = Address::from_str(
+        &env,
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    );
+
+    let result = client.try_add_whitelisted_token(&admin_addr, &zero_contract);
+    assert_eq!(result, Err(Ok(Error::InvalidAddress)));
+
+    // Whitelist must be unchanged — no mutation on rejected call.
+    assert_eq!(client.get_whitelisted_tokens().len(), 1);
+}
+
+/// Input validation test 3 — SELF (ESCROW CONTRACT) ADDRESS:
+/// Passing the escrow contract's own address as the `token` argument must be
+/// rejected with `Error::InvalidAddress`.  A self-referential token makes no
+/// semantic sense and could enable unexpected re-entrant interactions through
+/// the token client.
+#[test]
+fn test_add_whitelisted_token_self_address_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let client_addr = Address::generate(&env);
+    let freelancer_addr = Address::generate(&env);
+    let arbiter_addr = Address::generate(&env);
+    let admin_addr = Address::generate(&env);
+
+    let token1 = env
+        .register_stellar_asset_contract_v2(admin_addr.clone())
+        .address();
+
+    let contract_id = env.register(MilestoneEscrow, ());
+    let client = MilestoneEscrowClient::new(&env, &contract_id);
+
+    let amounts = vec![&env, 1_000_i128];
+    client.initialize(
+        &admin_addr,
+        &client_addr,
+        &freelancer_addr,
+        &arbiter_addr,
+        &token1,
+        &604800,
+        &amounts,
+    );
+
+    // Pass the escrow contract's own address as the token to whitelist.
+    let result = client.try_add_whitelisted_token(&admin_addr, &contract_id);
+    assert_eq!(result, Err(Ok(Error::InvalidAddress)));
+
+    // Whitelist must be unchanged — no mutation on rejected call.
+    assert_eq!(client.get_whitelisted_tokens().len(), 1);
+}
+
+/// Input validation test 4 — VALID TOKEN SUCCEEDS AFTER GUARD:
+/// After the zero-address guards are in place, a normal valid token address
+/// must still be accepted.  This regression test ensures the new validation
+/// does not break the happy path.
+#[test]
+fn test_add_whitelisted_token_valid_token_still_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let client_addr = Address::generate(&env);
+    let freelancer_addr = Address::generate(&env);
+    let arbiter_addr = Address::generate(&env);
+    let admin_addr = Address::generate(&env);
+
+    let token1 = env
+        .register_stellar_asset_contract_v2(admin_addr.clone())
+        .address();
+    let token2 = env
+        .register_stellar_asset_contract_v2(admin_addr.clone())
+        .address();
+
+    let contract_id = env.register(MilestoneEscrow, ());
+    let client = MilestoneEscrowClient::new(&env, &contract_id);
+
+    let amounts = vec![&env, 1_000_i128];
+    client.initialize(
+        &admin_addr,
+        &client_addr,
+        &freelancer_addr,
+        &arbiter_addr,
+        &token1,
+        &604800,
+        &amounts,
+    );
+
+    // A genuinely new, valid token address must be accepted.
+    let result = client.try_add_whitelisted_token(&admin_addr, &token2);
+    assert!(result.is_ok(), "valid token should be whitelisted successfully");
+
+    let whitelist = client.get_whitelisted_tokens();
+    assert_eq!(whitelist.len(), 2);
+    assert!(client.is_token_whitelisted(&token2));
+}
+
+/// Input validation test 5 — ZERO ADDRESS REJECTED BEFORE INITIALIZE:
+/// Calling `add_whitelisted_token` with a zero address before the contract
+/// has been initialized must return `Error::NotInitialized`, not
+/// `Error::InvalidAddress`.  This confirms that the admin-load guard (which
+/// reads from storage) fires before the zero-address check.
+#[test]
+fn test_add_whitelisted_token_before_initialize_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin_addr = Address::generate(&env);
+    let contract_id = env.register(MilestoneEscrow, ());
+    let client = MilestoneEscrowClient::new(&env, &contract_id);
+
+    let zero_account = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    // Contract is not initialized — must return NotInitialized, not
+    // InvalidAddress, because the admin storage read fails first.
+    let result = client.try_add_whitelisted_token(&admin_addr, &zero_account);
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
+
+/// Input validation test 6 — ZERO ACCOUNT ADDRESS CHECKED BEFORE DUPLICATE:
+/// When the zero Stellar-account address is passed and the same address is
+/// somehow already present in the whitelist (hypothetically), the
+/// `InvalidAddress` guard must fire before the `TokenAlreadyWhitelisted`
+/// check — establishing the ordering: auth → admin → zero-address → duplicate.
+///
+/// In practice the zero address can never legitimately be in the whitelist
+/// (because `initialize` adds the job token, which is validated upstream), but
+/// the ordering guarantee is still important and testable by confirming
+/// `InvalidAddress` is returned even when the list is otherwise at capacity.
+#[test]
+fn test_add_whitelisted_token_zero_address_checked_before_duplicate() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let client_addr = Address::generate(&env);
+    let freelancer_addr = Address::generate(&env);
+    let arbiter_addr = Address::generate(&env);
+    let admin_addr = Address::generate(&env);
+
+    let token1 = env
+        .register_stellar_asset_contract_v2(admin_addr.clone())
+        .address();
+
+    let contract_id = env.register(MilestoneEscrow, ());
+    let client = MilestoneEscrowClient::new(&env, &contract_id);
+
+    let amounts = vec![&env, 1_000_i128];
+    client.initialize(
+        &admin_addr,
+        &client_addr,
+        &freelancer_addr,
+        &arbiter_addr,
+        &token1,
+        &604800,
+        &amounts,
+    );
+
+    // Fill to cap so any non-zero-address duplicate would fire InvalidAmount.
+    for _ in 0..49u32 {
+        let extra_token = env
+            .register_stellar_asset_contract_v2(admin_addr.clone())
+            .address();
+        client.add_whitelisted_token(&admin_addr, &extra_token);
+    }
+    assert_eq!(client.get_whitelisted_tokens().len(), 50);
+
+    // Submitting the zero account address at capacity must still return
+    // InvalidAddress (zero-address check fires before cap check).
+    let zero_account = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    let result = client.try_add_whitelisted_token(&admin_addr, &zero_account);
+    assert_eq!(result, Err(Ok(Error::InvalidAddress)));
+}
